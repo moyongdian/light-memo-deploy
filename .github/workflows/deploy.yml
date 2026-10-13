@@ -1,0 +1,127 @@
+name: Build & Deploy (Docker)
+
+# 触发时机：推送到 main 分支，或手动点 "Run workflow"
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一时间只允许一个部署在跑，避免两台机器抢着更新服务器
+concurrency:
+  group: deploy-docker
+  cancel-in-progress: false
+
+jobs:
+  # ============ Job 1：构建镜像并推送到 GHCR ============
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # 必须有，否则推不进 GHCR
+    outputs:
+      image-base: ${{ steps.vars.outputs.image-base }}
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 计算镜像名和标签
+        id: vars
+        run: |
+          # GHCR 要求镜像名全小写，仓库名可能有大写字母，这里统一转小写
+          echo "image-base=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: 开启 BuildKit 缓存
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # Actions 自动发放，不用自己配
+
+      # 后端镜像
+      - name: 构建并推送 memo-api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image-base }}/memo-api:latest
+            ${{ steps.vars.outputs.image-base }}/memo-api:${{ steps.vars.outputs.tag }}
+          cache-from: type=gha,scope=memo-api
+          cache-to: type=gha,mode=max,scope=memo-api
+
+      # 前端镜像（需要 SITE_URL 变量，在仓库 Settings → Variables 里配置）
+      - name: 构建并推送 memo-web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: true
+          build-args: |
+            VITE_API_BASE_URL=${{ vars.SITE_URL }}
+          tags: |
+            ${{ steps.vars.outputs.image-base }}/memo-web:latest
+            ${{ steps.vars.outputs.image-base }}/memo-web:${{ steps.vars.outputs.tag }}
+          cache-from: type=gha,scope=memo-web
+          cache-to: type=gha,mode=max,scope=memo-web
+
+  # ============ Job 2：SSH 到服务器拉镜像重启 ============
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # 仓库变量 DEPLOY_ENABLED=true 才会真正部署。
+    # 这样在服务器还没准备好时，可以先推代码让 CI 只构建镜像不部署。
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 把编排文件同步到服务器（镜像里已经不需要它们了，只有 compose 和 nginx 配置需要落盘）
+      - name: 同步 docker-compose.yml 与 nginx 配置
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          source: "docker-compose.yml,deploy/nginx/"
+          target: ${{ secrets.SERVER_DIR }}
+
+      - name: 拉取新镜像并重启服务
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          IMAGE_BASE: ${{ needs.build.outputs.image-base }}
+          TAG: ${{ needs.build.outputs.tag }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          envs: IMAGE_BASE,TAG,GHCR_USER,GHCR_TOKEN
+          script: |
+            set -e
+            cd ${{ secrets.SERVER_DIR }}
+            echo "==> 部署 $IMAGE_BASE，标签 $TAG"
+
+            # 镜像仓库是私有时才需要登录；设为 public 可跳过这一步
+            if [ -n "$GHCR_TOKEN" ]; then
+              echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            fi
+
+            # 用环境变量注入镜像地址与标签，compose 会做变量替换
+            export IMAGE_BASE TAG
+            docker compose pull
+            docker compose up -d --remove-orphans
+
+            # 清理旧镜像，防止磁盘被历史版本占满
+            docker image prune -f
+
+            # 冒烟测试：健康检查过了才算部署成功
+            sleep 5
+            docker compose ps
+            curl -fsS http://127.0.0.1/healthz && echo " ==> healthz OK"

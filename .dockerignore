@@ -1,0 +1,17 @@
+# 构建上下文里不需要的东西：减小体积、加快传输、避免把本地垃圾打进镜像
+.git
+.github
+node_modules
+**/node_modules
+dist
+coverage
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+docs
+.codegraph
+.cursor
+*.md

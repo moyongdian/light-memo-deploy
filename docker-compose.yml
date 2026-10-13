@@ -1,0 +1,64 @@
+# 用法：
+#   本地/服务器首次启动：  docker compose up -d --build
+#   CI 自动部署时：        docker compose pull && docker compose up -d
+#
+# 说明：这里同时写了 image: 和 build:
+#   - 有 build  → 本地可以自己构建（学习、调试用）
+#   - 有 image  → 线上直接拉 GHCR 上 CI 构建好的镜像（服务器不用编译，省 CPU 和内存）
+# 两边共用同一份配置，是“构建与部署分离”的标准做法。
+
+services:
+  # ---------------- 后端 API（Go + SQLite） ----------------
+  api:
+    image: ${IMAGE_BASE:-ghcr.io/moyongdian/light-memo}/memo-api:${TAG:-latest}
+    build:
+      # 后端只需要 backend/ 目录，上下文越小构建越快
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: memo-api
+    restart: unless-stopped
+    environment:
+      # 容器内必须监听 0.0.0.0，否则 Nginx 容器无法访问
+      MEMO_LISTEN_ADDR: 0.0.0.0:8080
+      MEMO_DATABASE_PATH: /var/lib/memo/memo.db
+    volumes:
+      # 具名数据卷：容器删了数据还在。SQLite 数据库唯一需要持久化的东西。
+      # 注意：不要挂载单个文件，SQLite 的 WAL/SHM 需要和 db 同目录。
+      - memo-data:/var/lib/memo
+    # 不对外暴露端口，只允许 Docker 内网（Nginx）访问 —— 更安全
+    expose:
+      - "8080"
+    healthcheck:
+      # 项目自带 /healthz，会顺带检查数据库连通性
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---------------- 前端 Web（Nginx 静态托管 + 反向代理） ----------------
+  web:
+    image: ${IMAGE_BASE:-ghcr.io/moyongdian/light-memo}/memo-web:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # 前后端同源部署，所以这里填站点自身的地址（IP 或域名，不要带 /api）
+        # 换了域名必须重新 build，因为这个值被编译进前端产物了
+        VITE_API_BASE_URL: ${SITE_URL:-http://localhost}
+    container_name: memo-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      # 只有 Nginx 暴露到公网：80（HTTP）
+      # 上 HTTPS 后改成 "80:80" + "443:443"，见 docs/DEPLOY-DOCKER.md
+      - "80:80"
+    # 调试技巧：想不重建镜像就改 Nginx 配置，把下面两行的注释打开，
+    # 然后 docker compose restart web（改完记得同步回仓库，否则 CI 部署会被覆盖）
+    # volumes:
+    #   - ./deploy/nginx/memo.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  memo-data:

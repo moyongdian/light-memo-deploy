@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+*.db
+*.db-shm
+*.db-wal
+backend/memo-api
+coverage/
+*.tsbuildinfo
+
+# SSH 私钥与证书，绝不能进版本库
+deploy/keys/
+*.pem
+*.key
+
+# 本地工作数据（含服务器凭据，不入库）
+.workbuddy/
+
+docs/SSH-LOGIN-XSHELL.md

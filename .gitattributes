@@ -1,0 +1,9 @@
+# 统一用 LF 换行：Windows 的 CRLF 会让 Linux 里的 .sh 脚本报
+# "/bin/bash^M: bad interpreter"，是跨平台部署的经典坑。
+* text=auto eol=lf
+
+# 二进制文件不要被 git 做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary
