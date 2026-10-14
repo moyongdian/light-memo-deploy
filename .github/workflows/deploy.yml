@@ -45,7 +45,7 @@ jobs:
       - name: 构建并推送 memo-api
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./backend
           file: backend/Dockerfile
           push: true
           tags: |
@@ -79,16 +79,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 把编排文件同步到服务器（镜像里已经不需要它们了，只有 compose 和 nginx 配置需要落盘）
-      - name: 同步 docker-compose.yml 与 nginx 配置
+      # 把编排文件同步到服务器。
+      # 注意：override 文件必须先于 compose 文件到位，否则 compose 会以为服务缺少 443 配置。
+      - name: 同步 docker-compose.yml、override 与 nginx 配置
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
-          source: "docker-compose.yml,deploy/nginx/"
+          source: "docker-compose.yml,deploy/nginx/,deploy/docker-compose.override.yml,deploy/server-deploy.sh"
           target: ${{ secrets.SERVER_DIR }}
+          # 保留仓库里的目录结构，避免文件散落到根目录
+          strip_components: 0
+          overwrite: true
+
+      - name: 把 override 与部署脚本放到正确位置
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SERVER_DIR: ${{ secrets.SERVER_DIR }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          envs: SERVER_DIR
+          script: |
+            set -e
+            cd "$SERVER_DIR"
+            # scp-action 会把 deploy/ 整个目录传上来，这里把 override 移到位
+            if [ -f deploy/docker-compose.override.yml ]; then
+              cp deploy/docker-compose.override.yml ./docker-compose.override.yml
+            fi
+            # 部署脚本统一放到 /srv/light-memo/deploy.sh
+            if [ -f deploy/server-deploy.sh ]; then
+              install -m 755 deploy/server-deploy.sh /srv/light-memo/deploy.sh
+            fi
+            echo "==> 文件就位"
+            ls -la docker-compose.yml docker-compose.override.yml 2>/dev/null || true
 
       - name: 拉取新镜像并重启服务
         uses: appleboy/ssh-action@v1.0.3
@@ -96,32 +124,16 @@ jobs:
           IMAGE_BASE: ${{ needs.build.outputs.image-base }}
           TAG: ${{ needs.build.outputs.tag }}
           GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
           envs: IMAGE_BASE,TAG,GHCR_USER,GHCR_TOKEN
+          command_timeout: 10m
           script: |
+            # 交给服务器上的部署脚本执行；set -e 让任一步失败都中断
             set -e
-            cd ${{ secrets.SERVER_DIR }}
-            echo "==> 部署 $IMAGE_BASE，标签 $TAG"
-
-            # 镜像仓库是私有时才需要登录；设为 public 可跳过这一步
-            if [ -n "$GHCR_TOKEN" ]; then
-              echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            fi
-
-            # 用环境变量注入镜像地址与标签，compose 会做变量替换
-            export IMAGE_BASE TAG
-            docker compose pull
-            docker compose up -d --remove-orphans
-
-            # 清理旧镜像，防止磁盘被历史版本占满
-            docker image prune -f
-
-            # 冒烟测试：健康检查过了才算部署成功
-            sleep 5
-            docker compose ps
-            curl -fsS http://127.0.0.1/healthz && echo " ==> healthz OK"
+            export IMAGE_BASE TAG GHCR_USER GHCR_TOKEN
+            bash /srv/light-memo/deploy.sh

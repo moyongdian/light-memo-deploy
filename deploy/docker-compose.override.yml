@@ -1,0 +1,19 @@
+# docker-compose.override.yml —— 服务器端的 HTTPS 覆盖配置
+#
+# 作用：在不修改主 docker-compose.yml 的前提下，为 web 服务叠加 443 端口和证书挂载。
+# compose 会自动读取同目录下的 override 文件并与主文件【合并】。
+#
+# 为什么用 override 而不是改主文件：
+#   主配置是通用的（本地开发、CI 构建都用它），override 是【环境专属】的。
+#   这样同一份仓库既能在本地跑 HTTP，又能在服务器跑 HTTPS，互不污染。
+
+services:
+  web:
+    ports:
+      - "443:443"
+    volumes:
+      # 证书目录：只读挂载（容器不需要写证书）
+      - /srv/light-memo/certs:/etc/nginx/certs:ro
+      # 用 TLS 版站点配置替换镜像里的 HTTP 版
+      # 冒号前是宿主机路径，冒号后是容器路径，ro = read-only
+      - ./deploy/nginx/memo-ip-tls.conf:/etc/nginx/conf.d/default.conf:ro
