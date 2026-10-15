@@ -1,7 +1,9 @@
 name: Build and deploy frontend to EdgeOne Pages
 
 on:
-  push:
+  # 改为仅手动触发：这个流程部署到 EdgeOne Pages，需要 EDGEONE_API_TOKEN。
+  # 原来的 on: push 无分支限制，导致每次推送都会失败一次，制造噪音。
+  # 需要使用 EdgeOne 时，在 Actions 页面手动点 "Run workflow"。
   workflow_dispatch:
 
 permissions:

@@ -27,6 +27,9 @@ export default function LoginPage() {
         <Typography.Text type="secondary">
           输入密码，继续查看和记录。
         </Typography.Text>
+        <Typography.Text type="success" style={{ display: "block", marginTop: 8 }}>
+          已由 GitHub Actions 自动部署 · v2
+        </Typography.Text>
         {!login.isError && location.state?.sessionCheckError && (
           <Alert
             type="warning"
